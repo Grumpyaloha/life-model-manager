@@ -1,1 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Life Model Data</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script type="module">
+        // Firebase App (the core Firebase SDK) is always required and must be listed first
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        // Add SDKs for Firebase products that you want to use
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            collection, 
+            addDoc, 
+            query, 
+            orderBy, 
+            onSnapshot, 
+            serverTimestamp,
+            doc, 
+            setDoc,
+            getDoc,
+            updateDoc,
+            deleteDoc,
+            where,
+            setLogLevel
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Your web app's Firebase configuration
+        // IMPORTANT: These are placeholders. In a real Canvas environment, 
+        // __firebase_config, __app_id, and __initial_auth_token would be provided.
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : { apiKey: "YOUR_API_KEY", authDomain: "YOUR_AUTH_DOMAIN", projectId: "YOUR_PROJECT_ID" }; // Replace with your actual config if testing locally
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-life-model-app';
+        
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // Enable Firestore debug logging
+        // setLogLevel('debug'); // Uncomment for detailed logs
+
+        let userId = null;
+        let lifeEntriesListener = null; // To keep track of the Firestore listener
+
+        // DOM Elements
+        const entryTypeSelect = document.getElementById('entryType');
+        const entryTextarea = document.getElementById('entryText');
+        const saveEntryButton = document.getElementById('saveEntryButton');
+        const entriesContainer = document.getElementById('entriesContainer');
+        const llmInsightsButton = document.getElementById('llmInsightsButton');
+        const llmMessageDiv = document.getElementById('llmMessage');
+        const userIdDisplay = document.getElementById('userIdDisplay');
+        const authStatusDisplay = document.getElementById('authStatus');
+
+        // --- Authentication ---
+        async function setupAuth() {
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    console.log("User is signed in with UID:", userId);
+                    authStatusDisplay.textContent = `Authenticated`;
+                    userIdDisplay.textContent = `User ID: ${userId}`;
+                    loadEntries(); // Load entries once authenticated
+                } else {
+                    console.log("User is signed out. Attempting to sign in.");
+                    authStatusDisplay.textContent = "Authenticating...";
+                    userIdDisplay.textContent = "User ID: Not authenticated";
+                    if (lifeEntriesListener) lifeEntriesListener(); // Unsubscribe from previous listener if any
+                    entriesContainer.innerHTML = '<p class="text-gray-500">Please wait, authenticating...</p>';
+                    
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            console.log("Attempting sign in with custom token.");
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            console.log("Attempting to sign in anonymously.");
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Error during sign-in:", error);
+                        authStatusDisplay.textContent = "Authentication Failed. Please refresh.";
+                        entriesContainer.innerHTML = `<p class="text-red-500">Authentication failed: ${error.message}. Please refresh the page.</p>`;
+                    }
+                }
+            });
+        }
+        
+        // --- Firestore Operations ---
+        async function saveEntry() {
+            if (!userId) {
+                showMessage("Error: User not authenticated. Cannot save entry.", "error", llmMessageDiv);
+                return;
+            }
+            if (!entryTextarea.value.trim()) {
+                showMessage("Error: Entry text cannot be empty.", "error", llmMessageDiv);
+                return;
+            }
+
+            const entryData = {
+                userId: userId, // Store userId for potential future cross-user features (though rules restrict access now)
+                type: entryTypeSelect.value,
+                text: entryTextarea.value.trim(),
+                createdAt: serverTimestamp(), // Use server timestamp for consistency
+                updatedAt: serverTimestamp() 
+            };
+
+            try {
+                // Path: /artifacts/{appId}/users/{userId}/{collectionName}/{documentId}
+                const userEntriesCollectionPath = `artifacts/${appId}/users/${userId}/life_entries`;
+                const entriesCollectionRef = collection(db, userEntriesCollectionPath);
+                
+                await addDoc(entriesCollectionRef, entryData);
+                showMessage("Entry saved successfully!", "success", llmMessageDiv);
+                entryTextarea.value = ''; // Clear textarea
+            } catch (error) {
+                console.error("Error saving entry: ", error);
+                showMessage(`Error saving entry: ${error.message}`, "error", llmMessageDiv);
+            }
+        }
+
+        function loadEntries() {
+            if (!userId) {
+                entriesContainer.innerHTML = '<p class="text-gray-500">Not authenticated. Cannot load entries.</p>';
+                return;
+            }
+
+            // Unsubscribe from any previous listener to avoid multiple listeners on user change or re-auth
+            if (lifeEntriesListener) {
+                lifeEntriesListener();
+            }
+            
+            const userEntriesCollectionPath = `artifacts/${appId}/users/${userId}/life_entries`;
+            // Note: orderBy is commented out as it might require composite indexes.
+            // For simplicity in this example, we'll sort client-side if needed, or rely on Firestore's default ordering by ID.
+            // If you need specific ordering, ensure you create the necessary composite indexes in Firestore.
+            // const q = query(collection(db, userEntriesCollectionPath), orderBy("createdAt", "desc"));
+            const q = query(collection(db, userEntriesCollectionPath));
+
+
+            entriesContainer.innerHTML = '<p class="text-gray-500">Loading entries...</p>'; // Loading state
+
+            lifeEntriesListener = onSnapshot(q, (querySnapshot) => {
+                const entries = [];
+                querySnapshot.forEach((doc) => {
+                    entries.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Simple client-side sort if not using Firestore orderBy
+                // Sort by createdAt timestamp, newest first. Handle cases where createdAt might be null (pending server write)
+                entries.sort((a, b) => {
+                    const timeA = a.createdAt ? a.createdAt.toMillis() : 0;
+                    const timeB = b.createdAt ? b.createdAt.toMillis() : 0;
+                    return timeB - timeA;
+                });
+
+                displayEntries(entries);
+            }, (error) => {
+                console.error("Error loading entries: ", error);
+                entriesContainer.innerHTML = `<p class="text-red-500">Error loading entries: ${error.message}. Try refreshing.</p>`;
+                showMessage(`Error loading entries: ${error.message}`, "error", llmMessageDiv);
+            });
+        }
+
+        function displayEntries(entries) {
+            entriesContainer.innerHTML = ''; // Clear previous entries
+            if (entries.length === 0) {
+                entriesContainer.innerHTML = '<p class="text-gray-500">No entries yet. Add one above!</p>';
+                return;
+            }
+
+            entries.forEach(entry => {
+                const entryElement = document.createElement('div');
+                entryElement.className = 'bg-white p-4 rounded-lg shadow mb-3';
+                
+                const entryDate = entry.createdAt ? new Date(entry.createdAt.seconds * 1000).toLocaleString() : 'Date pending...';
+                
+                entryElement.innerHTML = `
+                    <div class="flex justify-between items-center mb-1">
+                        <h3 class="text-lg font-semibold text-indigo-600">${escapeHTML(entry.type)}</h3>
+                        <span class="text-xs text-gray-500">${escapeHTML(entryDate)}</span>
+                    </div>
+                    <p class="text-gray-700 whitespace-pre-wrap">${escapeHTML(entry.text)}</p>
+                    <div class="mt-2 text-right">
+                        <button data-id="${entry.id}" class="delete-entry-btn text-red-500 hover:text-red-700 text-sm">Delete</button>
+                    </div>
+                `;
+                entriesContainer.appendChild(entryElement);
+            });
+
+            // Add event listeners for delete buttons
+            document.querySelectorAll('.delete-entry-btn').forEach(button => {
+                button.addEventListener('click', async (event) => {
+                    const entryId = event.target.dataset.id;
+                    await deleteEntry(entryId);
+                });
+            });
+        }
+
+        async function deleteEntry(entryId) {
+            if (!userId || !entryId) {
+                showMessage("Error: Cannot delete entry. Missing user ID or entry ID.", "error", llmMessageDiv);
+                return;
+            }
+            // Confirm deletion (using a custom modal in a real app, for now, simple confirmation)
+            // For this example, we'll skip the confirm() and proceed with deletion.
+            // In a real app: if (!customConfirm("Are you sure you want to delete this entry?")) return;
+
+            try {
+                const entryDocRef = doc(db, `artifacts/${appId}/users/${userId}/life_entries`, entryId);
+                await deleteDoc(entryDocRef);
+                showMessage("Entry deleted successfully.", "success", llmMessageDiv);
+                // The onSnapshot listener will automatically update the UI.
+            } catch (error) {
+                console.error("Error deleting entry: ", error);
+                showMessage(`Error deleting entry: ${error.message}`, "error", llmMessageDiv);
+            }
+        }
+
+
+        // --- Utility Functions ---
+        function showMessage(message, type = "info", element) {
+            if (!element) { // Default to llmMessageDiv if no specific element is provided
+                element = llmMessageDiv;
+            }
+            element.textContent = message;
+            element.className = 'p-3 rounded-md text-sm mb-4 '; // Base classes
+            if (type === "success") {
+                element.classList.add('bg-green-100', 'text-green-700');
+            } else if (type === "error") {
+                element.classList.add('bg-red-100', 'text-red-700');
+            } else { // info
+                element.classList.add('bg-blue-100', 'text-blue-700');
+            }
+            element.style.display = 'block';
+            // Automatically hide the message after some time
+            setTimeout(() => {
+                element.style.display = 'none';
+            }, 5000);
+        }
+
+        function escapeHTML(str) {
+            if (str === null || typeof str === 'undefined') return '';
+            return str.toString()
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        // --- Event Listeners ---
+        saveEntryButton.addEventListener('click', saveEntry);
+
+        llmInsightsButton.addEventListener('click', () => {
+            // Placeholder for LLM interaction
+            // In a real app, you might collect some data and send it to an LLM API
+            showMessage("LLM Insights feature is under development. Stay tuned!", "info", llmMessageDiv);
+            
+            // Example: Call Gemini API (conceptual, needs proper setup and API key if not using gemini-2.0-flash)
+            // generateTextWithGemini("Summarize the user's recent goals."); 
+        });
+
+        // Example function to call Gemini API (very basic, for illustration)
+        // Ensure you handle API keys and errors properly in a real application.
+        async function generateTextWithGemini(promptText) {
+            if (!userId) {
+                 showMessage("User not authenticated. Cannot fetch LLM insights.", "error", llmMessageDiv);
+                 return;
+            }
+            showMessage("Fetching insights from LLM...", "info", llmMessageDiv);
+
+            // Fetch recent entries to provide context (example: last 5 entries)
+            const userEntriesCollectionPath = `artifacts/${appId}/users/${userId}/life_entries`;
+            const q = query(collection(db, userEntriesCollectionPath)/*, orderBy("createdAt", "desc"), limit(5)*/); // orderBy and limit might need indexes
+            
+            let contextText = "User's recent entries:\n";
+            try {
+                const querySnapshot = await getDocs(q); // Using getDocs for a one-time fetch for LLM context
+                if (querySnapshot.empty) {
+                    contextText += "No entries found.\n";
+                }
+                querySnapshot.forEach(doc => {
+                    const data = doc.data();
+                    contextText += `- ${data.type}: ${data.text}\n`;
+                });
+            } catch (err) {
+                console.error("Error fetching entries for LLM context:", err);
+                showMessage("Could not fetch context for LLM.", "error", llmMessageDiv);
+                return;
+            }
+
+            const fullPrompt = `${contextText}\nBased on the above, ${promptText}`;
+            console.log("Sending to LLM:", fullPrompt);
+
+            let chatHistory = [{ role: "user", parts: [{ text: fullPrompt }] }];
+            const payload = { contents: chatHistory };
+            const apiKey = ""; // For gemini-2.0-flash, API key is handled by Canvas. For other models, provide key.
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(`API Error (${response.status}): ${errorData.error?.message || 'Unknown error'}`);
+                }
+                const result = await response.json();
+
+                if (result.candidates && result.candidates.length > 0 &&
+                    result.candidates[0].content && result.candidates[0].content.parts &&
+                    result.candidates[0].content.parts.length > 0) {
+                    const text = result.candidates[0].content.parts[0].text;
+                    showMessage(`LLM Insight: ${text}`, "success", llmMessageDiv);
+                } else {
+                    console.log("LLM response structure unexpected:", result);
+                    showMessage("Received an empty or unexpected response from LLM.", "info", llmMessageDiv);
+                }
+            } catch (error) {
+                console.error('Error calling Gemini API:', error);
+                showMessage(`Error getting LLM insights: ${error.message}`, "error", llmMessageDiv);
+            }
+        }
+
+
+        // --- Initialize ---
+        // Call setupAuth when the DOM is fully loaded and Firebase scripts are ready
+        document.addEventListener('DOMContentLoaded', () => {
+            // It's generally better to wait for Firebase to be fully initialized.
+            // However, for this structure, onAuthStateChanged will handle the user state.
+            setupAuth();
+        });
+
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f4f7f6; /* A soft off-white */
+        }
+        /* Custom scrollbar for a cleaner look */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+        .whitespace-pre-wrap {
+             white-space: pre-wrap; /* Ensures newlines in textarea are preserved on display */
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-center p-4 bg-gradient-to-br from-slate-900 to-slate-700 text-slate-100">
+
+    <div class="w-full max-w-2xl bg-slate-800 p-6 sm:p-8 rounded-xl shadow-2xl space-y-6">
+        <header class="text-center">
+            <h1 class="text-3xl sm:text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">Life Model Journal</h1>
+            <p id="authStatus" class="text-xs text-slate-400 mt-1">Initializing...</p>
+            <p id="userIdDisplay" class="text-xs text-slate-400">User ID: Not authenticated</p>
+        </header>
+
+        <div id="llmMessage" class="p-3 rounded-md text-sm mb-4" style="display: none;">
+            </div>
+        
+        <section class="space-y-4">
+            <div>
+                <label for="entryType" class="block text-sm font-medium text-slate-300 mb-1">Entry Type:</label>
+                <select id="entryType" name="entryType" class="w-full p-3 bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition duration-150">
+                    <option value="Reflection">Reflection</option>
+                    <option value="Goal">Goal</option>
+                    <option value="Task">Task</option>
+                    <option value="Idea">Idea</option>
+                    <option value="Gratitude">Gratitude</option>
+                </select>
+            </div>
+
+            <div>
+                <label for="entryText" class="block text-sm font-medium text-slate-300 mb-1">Your Entry:</label>
+                <textarea id="entryText" name="entryText" rows="4" class="w-full p-3 bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition duration-150" placeholder="What's on your mind? What are you working towards?"></textarea>
+            </div>
+
+            <div class="flex flex-col sm:flex-row sm:space-x-3 space-y-3 sm:space-y-0">
+                <button id="saveEntryButton" class="w-full sm:w-auto flex-grow bg-gradient-to-r from-emerald-500 to-green-500 hover:from-emerald-600 hover:to-green-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:shadow-lg transform hover:scale-105 transition duration-150 ease-in-out">
+                    Save Entry
+                </button>
+                <button id="llmInsightsButton" class="w-full sm:w-auto flex-grow bg-gradient-to-r from-sky-500 to-cyan-500 hover:from-sky-600 hover:to-cyan-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:shadow-lg transform hover:scale-105 transition duration-150 ease-in-out">
+                    Get LLM Insights (Test)
+                </button>
+            </div>
+        </section>
+
+        <section class="mt-8">
+            <h2 class="text-2xl font-semibold mb-4 text-slate-200">My Entries</h2>
+            <div id="entriesContainer" class="space-y-4 max-h-[400px] overflow-y-auto p-1 rounded-lg bg-slate-700/50 custom-scrollbar">
+                <p class="text-slate-400 p-4">Loading entries...</p>
+            </div>
+        </section>
+
+        <footer class="text-center text-xs text-slate-500 pt-6">
+            <p>&copy; 2025 Life Model Manager. Foundation V1.</p>
+        </footer>
+    </div>
+
+</body>
+</html>
 
